@@ -1,0 +1,110 @@
+name: Update Kirby CMS
+
+on:
+  workflow_dispatch:
+    inputs:
+      updates:
+        description: 'JSON-Objekt mit Paketnamen und Versionen (z. B. {"getkirby/cms":"4.7.1","filp/whoops":"2.18.0"})'
+        required: true
+
+jobs:
+  check-if-needed:
+    runs-on: ubuntu-latest
+    outputs:
+      continue: ${{ steps.check.outputs.continue }}
+      hash: ${{ steps.hash.outputs.hash }}
+      branch_name: ${{ steps.hash.outputs.branch_name }}
+
+    steps:
+      - name: Berechne Hash aus Updates-Objekt
+        id: hash
+        run: |
+          echo '${{ github.event.inputs.updates }}' | sha256sum | cut -c1-10 > hash.txt
+          HASH=$(cat hash.txt)
+          echo "hash=$HASH" >> $GITHUB_OUTPUT
+          echo "branch_name=update-dependencies-$HASH" >> $GITHUB_OUTPUT
+
+      - name: Prüfe PR- oder Branch-Existenz
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME=update-dependencies-$(echo '${{ github.event.inputs.updates }}' | sha256sum | cut -c1-10)
+
+          PR_EXISTS=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH_NAME" --json number --jq '. | length')
+          if [ "$PR_EXISTS" -gt 0 ]; then
+            echo "continue=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BRANCH_EXISTS=$(git ls-remote --heads origin "$BRANCH_NAME" | wc -l)
+          if [ "$BRANCH_EXISTS" -gt 0 ]; then
+            echo "continue=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "continue=true" >> "$GITHUB_OUTPUT"
+
+  update:
+    needs: check-if-needed
+    if: needs.check-if-needed.outputs.continue == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set git user
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create update branch
+        run: |
+          git checkout -b "${{ needs.check-if-needed.outputs.branch_name }}"
+
+      - name: Install DDEV
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/drud/ddev/master/scripts/install_ddev.sh | bash
+
+      - name: Start DDEV and update packages
+        run: |
+          ddev config global --instrumentation-opt-in=false
+          ddev start
+
+          echo '${{ github.event.inputs.updates }}' > updates.json
+          PACKAGES=$(jq -r 'to_entries[] | "\(.key):\(.value)"' updates.json | tr '\n' ' ')
+
+          echo "📦 Installing: $PACKAGES"
+          ddev composer require $PACKAGES --with-all-dependencies
+
+      - name: Stop DDEV
+        if: always()
+        run: ddev stop
+
+      - name: Commit changes
+        run: |
+          git add composer.json composer.lock
+          git commit -m "Update dependencies via workflow" || echo "No changes to commit"
+
+      - name: Push changes using GitHub Actions token
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}
+          git push origin "${{ needs.check-if-needed.outputs.branch_name }}"
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "Update dependencies via workflow"
+          title: "Update dependencies: ${{ needs.check-if-needed.outputs.hash }}"
+          body: |
+            Dieses PR-Update aktualisiert folgende Abhängigkeiten:
+
+            ```json
+            ${{ github.event.inputs.updates }}
+            ```
+          branch: ${{ needs.check-if-needed.outputs.branch_name }}
+          base: main
