@@ -157,7 +157,6 @@ jobs:
                    --delete \
                    --only-newer \
                    --verbose \
-                   --dry-run \
                    -x '^node_modules$' \
                    -x '^node_modules/*$' \
                    -x '^.*/node_modules$' \
