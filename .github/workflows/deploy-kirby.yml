@@ -1,0 +1,180 @@
+name: DDEV Setup & Remote Sync
+
+on:
+  workflow_call:
+    inputs:
+      branch:
+        required: true
+        type: string
+    secrets:
+      PROD_HOST:
+        required: false
+      PROD_USER:
+        required: false
+      PROD_PASSWORD:
+        required: false
+      PROD_REMOTE_PATH:
+        required: false
+      PROD_SFTP:
+        required: false
+      STAGE_HOST:
+        required: false
+      STAGE_USER:
+        required: false
+      STAGE_PASSWORD:
+        required: false
+      STAGE_REMOTE_PATH:
+        required: false
+      STAGE_SFTP:
+        required: false
+
+jobs:
+  setup-and-sync:
+    runs-on: ubuntu-latest
+    env:
+      DDEV_NONINTERACTIVE: "true"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Composer dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.composer/cache
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-composer-
+
+      - name: Cache npm dependencies
+        uses: actions/cache@v4
+        with:
+          path: .ddev/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      - name: Install DDEV
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/drud/ddev/master/scripts/install_ddev.sh | bash
+
+      - name: Start DDEV and install dependencies
+        run: |
+          ddev start
+          ddev composer install
+          ddev exec npm ci
+          ddev exec npm run build
+
+      - name: Determine environment based on branch
+        id: env
+        run: |
+          if [[ "${GITHUB_REF##*/}" == "main" ]]; then
+            echo "env=production" >> "$GITHUB_OUTPUT"
+          elif [[ "${GITHUB_REF##*/}" == "stage" ]]; then
+            echo "env=staging" >> "$GITHUB_OUTPUT"
+          else
+            echo "Unsupported branch: ${GITHUB_REF##*/}" >&2
+            exit 1
+          fi
+
+      - name: Sync remote data (from local → remote)
+        run: |
+          echo "::group::Sync to remote server"
+
+          sudo apt-get update && sudo apt-get install -y lftp
+
+          BRANCH="${GITHUB_REF##*/}"
+          echo "Detected branch: $BRANCH"
+
+          if [[ "$BRANCH" == "main" ]]; then
+            echo "Environment: production"
+            HOST="${{ secrets.PROD_HOST }}"
+            USER="${{ secrets.PROD_USER }}"
+            PASS="${{ secrets.PROD_PASSWORD }}"
+            REMOTE_PATH="${{ secrets.PROD_REMOTE_PATH }}"
+            if [[ -n "${{ secrets.PROD_SFTP }}" ]]; then
+              PROTOCOL="sftp"
+              PORT="${{ secrets.PROD_SFTP }}"
+            else
+              PROTOCOL="ftp"
+              PORT="21"
+            fi
+          elif [[ "$BRANCH" == "stage" ]]; then
+            echo "Environment: staging"
+            HOST="${{ secrets.STAGE_HOST }}"
+            USER="${{ secrets.STAGE_USER }}"
+            PASS="${{ secrets.STAGE_PASSWORD }}"
+            REMOTE_PATH="${{ secrets.STAGE_REMOTE_PATH }}"
+            if [[ -n "${{ secrets.STAGE_SFTP }}" ]]; then
+              PROTOCOL="sftp"
+              PORT="${{ secrets.STAGE_SFTP }}"
+            else
+              PROTOCOL="ftp"
+              PORT="21"
+            fi
+          else
+            echo "❌ Unsupported branch: $BRANCH"
+            exit 1
+          fi
+
+          echo "Testing $PROTOCOL connection to $HOST:$PORT …"
+
+          lftp -u "$USER","$PASS" -p "$PORT" "$PROTOCOL://$HOST" -e "ls $REMOTE_PATH; exit" || {
+            echo "❌ Verbindung fehlgeschlagen. Prüfe Zugangsdaten und Port."
+            exit 1
+          }
+
+          echo "✅ Verbindung erfolgreich."
+
+          echo "::group::Activate maintenance mode (upload maintenance.php → index.php)"
+          lftp -u "$USER","$PASS" -p "$PORT" "$PROTOCOL://$HOST" -e "
+            set ftp:ssl-allow true;
+            set ftp:ssl-force true;
+            set ftp:ssl-protect-data true;
+            set ftp:ssl-protect-list true;
+            set sftp:auto-confirm yes;
+            set xfer:clobber true;
+
+            cd $REMOTE_PATH/public;
+            put .github/workflows/maintenance.php -o index.php;
+
+            bye
+          "
+          echo "::endgroup::"
+
+          echo "::group::Start mirror upload from local → remote: $REMOTE_PATH"
+          lftp -u "$USER","$PASS" -p "$PORT" "$PROTOCOL://$HOST" -e "
+            set ftp:ssl-allow true;
+            set ftp:ssl-force true;
+            set ftp:ssl-protect-data true;
+            set ftp:ssl-protect-list true;
+            set xfer:clobber true;
+
+            mirror --reverse \
+                   --delete \
+                   --only-newer \
+                   --verbose \
+                   --dry-run \
+                   -x '^node_modules$' \
+                   -x '^node_modules/*$' \
+                   -x '^.*/node_modules$' \
+                   -x '^.*/node_modules/.*$' \
+                   -x '^.ddev$' \
+                   -x '^.ddev/.*$' \
+                   -x '^.*/.ddev$' \
+                   -x '^.*/.ddev/.*$' \
+                   -x '^data$' \
+                   -x '^data/.*' \
+                   -x '^.*/data$' \
+                   -x '^.git$' \
+                   -x '^.git/*$' \
+                   -x '^.github$' \
+                   -x '^.github/*$' \
+                   ./ $REMOTE_PATH;
+
+            bye
+          "
+          echo "::endgroup::"
