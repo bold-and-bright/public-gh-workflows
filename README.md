@@ -14,8 +14,7 @@ on:
 
 jobs:
   call-shared:
-    uses: bold-and-bright/public-gh-workflows/.github/workflows
-/update-kirby.yml@main
+    uses: bold-and-bright/public-gh-workflows/.github/workflows/update-kirby.yml@main
     with:
       updates: ${{ inputs.updates }}
     secrets:
