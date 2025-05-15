@@ -1,0 +1,173 @@
+name: Nuxt Generate & Remote Sync
+
+on:
+  workflow_call:
+    inputs:
+      branch:
+        required: true
+        type: string
+    secrets:
+      PROD_HOST:
+        required: false
+      PROD_USER:
+        required: false
+      PROD_PASSWORD:
+        required: false
+      PROD_REMOTE_PATH:
+        required: false
+      PROD_SFTP:
+        required: false
+      STAGE_HOST:
+        required: false
+      STAGE_USER:
+        required: false
+      STAGE_PASSWORD:
+        required: false
+      STAGE_REMOTE_PATH:
+        required: false
+      STAGE_SFTP:
+        required: false
+
+jobs:
+  generate-and-sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Cache npm dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-nuxt-npm-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nuxt-npm-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate static Nuxt site
+        run: npx nuxi generate
+
+      - name: Install lftp
+        run: sudo apt-get update && sudo apt-get install -y lftp
+
+      - name: Deploy generated site to remote
+        run: |
+          echo "::group::Deploy to remote server"
+
+          BRANCH="${{ inputs.branch }}"
+          echo "Detected branch: $BRANCH"
+
+          if [[ "$BRANCH" == "main" ]]; then
+            HOST="${{ secrets.PROD_HOST }}"
+            USER="${{ secrets.PROD_USER }}"
+            PASS="${{ secrets.PROD_PASSWORD }}"
+            REMOTE_PATH="${{ secrets.PROD_REMOTE_PATH }}"
+            if [[ -n "${{ secrets.PROD_SFTP }}" ]]; then
+              PROTOCOL="sftp"
+              PORT="${{ secrets.PROD_SFTP }}"
+            else
+              PROTOCOL="ftp"
+              PORT="21"
+            fi
+          elif [[ "$BRANCH" == "stage" ]]; then
+            HOST="${{ secrets.STAGE_HOST }}"
+            USER="${{ secrets.STAGE_USER }}"
+            PASS="${{ secrets.STAGE_PASSWORD }}"
+            REMOTE_PATH="${{ secrets.STAGE_REMOTE_PATH }}"
+            if [[ -n "${{ secrets.STAGE_SFTP }}" ]]; then
+              PROTOCOL="sftp"
+              PORT="${{ secrets.STAGE_SFTP }}"
+            else
+              PROTOCOL="ftp"
+              PORT="21"
+            fi
+          else
+            echo "❌ Unsupported branch: $BRANCH"
+            exit 1
+          fi
+
+          echo "Testing $PROTOCOL connection to $HOST:$PORT …"
+          lftp -u "$USER","$PASS" -p "$PORT" "$PROTOCOL://$HOST" -e "ls $REMOTE_PATH; exit" || {
+            echo "❌ Verbindung fehlgeschlagen. Prüfe Zugangsdaten und Port."
+            exit 1
+          }
+
+          echo "✅ Verbindung erfolgreich."
+
+          OUTPUT_DIR="dist"
+          INDEX_FILE="$OUTPUT_DIR/index.html"
+
+          if [ ! -d "$OUTPUT_DIR" ]; then
+            echo "❌ Build output directory '$OUTPUT_DIR' nicht gefunden."
+            exit 1
+          fi
+
+          if [ -f ".github/workflows/maintenance.html" ]; then
+            echo "::group::Activate maintenance mode (upload maintenance.html → index.html)"
+            lftp -u "$USER","$PASS" -p "$PORT" "$PROTOCOL://$HOST" -e "
+              set ftp:ssl-allow true;
+              set ftp:ssl-force true;
+              set ftp:ssl-protect-data true;
+              set ftp:ssl-protect-list true;
+              set sftp:auto-confirm yes;
+              set xfer:clobber true;
+
+              cd $REMOTE_PATH;
+              put .github/workflows/maintenance.html -o index.html;
+
+              bye
+            "
+            echo "::endgroup::"
+          else
+            echo "⚠️ Keine maintenance.html gefunden – Maintenance-Modus wird übersprungen."
+          fi
+
+          echo "::group::Mirror static site (ohne index.html)"
+          lftp -u "$USER","$PASS" -p "$PORT" "$PROTOCOL://$HOST" -e "
+            set ftp:ssl-allow true;
+            set ftp:ssl-force true;
+            set ftp:ssl-protect-data true;
+            set ftp:ssl-protect-list true;
+            set xfer:clobber true;
+
+            mirror --reverse \
+                   --delete \
+                   --only-newer \
+                   --no-perms \
+                   --no-umask \
+                   --verbose \
+                   -x '^index\.html$' \
+                   -x '^.*/index\.html$' \
+                   $OUTPUT_DIR $REMOTE_PATH;
+
+            bye
+          "
+          echo "::endgroup::"
+
+          echo "::group::Upload final index.html"
+          if [ -f "$INDEX_FILE" ]; then
+            lftp -u "$USER","$PASS" -p "$PORT" "$PROTOCOL://$HOST" -e "
+              set ftp:ssl-allow true;
+              set ftp:ssl-force true;
+              set ftp:ssl-protect-data true;
+              set ftp:ssl-protect-list true;
+              set sftp:auto-confirm yes;
+              set xfer:clobber true;
+
+              cd $REMOTE_PATH;
+              put $INDEX_FILE;
+
+              bye
+            "
+          else
+            echo "⚠️ $INDEX_FILE nicht gefunden – kein finaler Upload."
+          fi
+          echo "::endgroup::"
