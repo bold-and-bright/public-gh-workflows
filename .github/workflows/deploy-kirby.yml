@@ -156,6 +156,8 @@ jobs:
             mirror --reverse \
                    --delete \
                    --only-newer \
+                   --no-perms \
+                   --no-umask \
                    --verbose \
                    -x '^node_modules$' \
                    -x '^node_modules/*$' \
