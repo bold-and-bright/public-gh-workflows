@@ -193,6 +193,14 @@ jobs:
                    -x '^.github/.*$' \
                    -x '^public/index\.php$' \
                    -x '^.*/public/index\.php$' \
+                   -x '^site/accounts$' \
+                   -x '^site/accounts/.*$' \
+                   -x '^.*/site/accounts$' \
+                   -x '^.*/site/accounts/.*$' \
+                   -x '^data/storage/content$' \
+                   -x '^data/storage/content/.*$' \
+                   -x '^.*/data/storage/content$' \
+                   -x '^.*/data/storage/content/.*$' \                   
                    ./ $REMOTE_PATH;
 
             bye
