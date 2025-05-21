@@ -65,8 +65,20 @@ jobs:
         run: |
           ddev start
           ddev composer install
-          ddev exec npm ci
-          ddev exec npm run build
+          
+          if [ -f "package.json" ]; then
+            echo "📦 package.json gefunden – npm wird ausgeführt."
+            ddev exec npm ci
+      
+            if ddev exec node -e "const pkg=require('./package.json'); process.exit(pkg.scripts?.build ? 0 : 1)" ; then
+              echo "🛠️ Build-Script gefunden – npm run build wird ausgeführt."
+              ddev exec npm run build
+            else
+              echo "⚠️ Kein build-Script in package.json gefunden – Schritt wird übersprungen."
+            fi
+          else
+            echo "⚠️ Keine package.json vorhanden – npm wird übersprungen."
+          fi
 
       - name: Determine environment based on branch
         id: env
