@@ -200,7 +200,7 @@ jobs:
                    -x '^data/storage/content$' \
                    -x '^data/storage/content/.*$' \
                    -x '^.*/data/storage/content$' \
-                   -x '^.*/data/storage/content/.*$' \                   
+                   -x '^.*/data/storage/content/.*$' \
                    ./ $REMOTE_PATH;
 
             bye
